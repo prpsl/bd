@@ -102,7 +102,7 @@ async function sendFile(f) {
   for (let o = 0; o < f.size; o += BLOCK) {
     const buf = new Uint8Array(await f.slice(o, o + BLOCK).arrayBuffer());
     for (let i = 0; i < buf.length; i += chunk) {
-      if (dc.bufferedAmount > 16 << 20) await new Promise(res => dc.onbufferedamountlow = res);
+      if (dc.bufferedAmount > 4 << 20) await new Promise(res => dc.onbufferedamountlow = res);
       dc.send(buf.subarray(i, i + chunk));
     }
     prog(r, Math.min(o + BLOCK, f.size), f.size);
