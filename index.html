@@ -29,6 +29,8 @@ const worker = new Worker('w.js');
 const closedQ = [];
 worker.onmessage = e => e.data === 'closed' ? closedQ.shift()() : status('เขียนไฟล์ผิดพลาด: ' + e.data);
 
+navigator.serviceWorker?.register('sw.js');
+
 // clear leftovers from previous sessions
 (async () => {
   try { const r = await navigator.storage.getDirectory();
@@ -78,10 +80,11 @@ async function finish() {
   await new Promise(res => closedQ.push(res));
   const file = await (await (await navigator.storage.getDirectory()).getFileHandle(r.opfs)).getFile();
   prog(r.row, r.size, r.size);
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(file); a.download = r.name; a.textContent = 'ดาวน์โหลด';
+  const a = document.createElement('a'); a.textContent = 'ดาวน์โหลด';
+  if (navigator.serviceWorker?.controller) a.href = 'dl/' + encodeURIComponent(r.opfs);  // streamed from disk
+  else { a.href = URL.createObjectURL(file); a.download = r.name; }
   const box = document.createElement('div'); box.append(a);
-  if (navigator.canShare) {
+  if (navigator.canShare && file.size < 1 << 30) {   // share loads the whole file into memory: small files only
     const shareFile = new File([file], r.name, {type: r.type || 'application/octet-stream'});
     if (navigator.canShare({files: [shareFile]})) {
       const b = document.createElement('button'); b.textContent = 'แชร์ / บันทึกลงรูปภาพ';
