@@ -16,6 +16,7 @@
 <p id="st">กำลังเริ่ม…</p>
 <p><input type="file" id="pick" multiple disabled></p>
 <div id="list"></div>
+<p style="color:#888">พื้นที่ชั่วคราวที่ใช้: <span id="use">-</span> <button id="clr">ลบไฟล์ที่รับไว้</button></p>
 
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
@@ -31,11 +32,17 @@ worker.onmessage = e => e.data === 'closed' ? closedQ.shift()() : status('เข
 
 navigator.serviceWorker?.register('sw.js');
 
-// clear leftovers from previous sessions
-(async () => {
+// temp files stay until user clears them (auto-clear on load killed in-progress downloads)
+async function showUsage() {
+  try { const e = await navigator.storage.estimate(); $('use').textContent = mb(e.usage); } catch {}
+}
+$('clr').onclick = async () => {
+  if (!confirm('ลบไฟล์ที่รับไว้ทั้งหมด? (ดาวน์โหลดที่ค้างอยู่จะล้มเหลว)')) return;
   try { const r = await navigator.storage.getDirectory();
         for await (const k of r.keys()) await r.removeEntry(k); } catch {}
-})();
+  showUsage();
+};
+showUsage();
 
 // keep screen awake (iOS kills background tabs)
 let lock;
@@ -81,8 +88,9 @@ async function finish() {
   const file = await (await (await navigator.storage.getDirectory()).getFileHandle(r.opfs)).getFile();
   prog(r.row, r.size, r.size);
   const a = document.createElement('a'); a.textContent = 'ดาวน์โหลด';
-  if (navigator.serviceWorker?.controller) a.href = 'dl/' + encodeURIComponent(r.opfs);  // streamed from disk
-  else { a.href = URL.createObjectURL(file); a.download = r.name; }
+  a.download = r.name;   // download attribute: no page navigation
+  a.href = navigator.serviceWorker?.controller ? 'dl/' + encodeURIComponent(r.opfs)  // streamed from disk
+                                               : URL.createObjectURL(file);
   const box = document.createElement('div'); box.append(a);
   if (navigator.canShare && file.size < 1 << 30) {   // share loads the whole file into memory: small files only
     const shareFile = new File([file], r.name, {type: r.type || 'application/octet-stream'});
@@ -92,7 +100,7 @@ async function finish() {
       box.append(' ', b);
     }
   }
-  r.row.append(box);
+  r.row.append(box); showUsage();
   dc.send(JSON.stringify({t: 'done'}));
 }
 
