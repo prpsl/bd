@@ -25,19 +25,9 @@ const BLOCK = 4 << 20;            // read 4MB from disk at a time
 let dc, pc, waitDone = null, rx = null, n = 0;
 
 // ---- disk writer: OPFS sync handle in a worker (works in Chrome + iOS Safari) ----
-const worker = new Worker(URL.createObjectURL(new Blob([`
-  let h, off = 0, q = Promise.resolve();
-  onmessage = e => { const d = e.data; q = q.then(async () => {
-    if (d.open) {
-      const root = await navigator.storage.getDirectory();
-      h = await (await root.getFileHandle(d.open, {create: true})).createSyncAccessHandle();
-      h.truncate(0); off = 0;
-    } else if (d.close) { h.flush(); h.close(); postMessage('closed'); }
-    else off += h.write(new Uint8Array(d), {at: off});
-  }).catch(err => postMessage('err:' + err)); };
-`], {type: 'text/javascript'})));
+const worker = new Worker('w.js');
 const closedQ = [];
-worker.onmessage = e => e.data === 'closed' ? closedQ.shift()() : status('เขียนไฟล์ผิดพลาด (พื้นที่เต็ม?) ' + e.data);
+worker.onmessage = e => e.data === 'closed' ? closedQ.shift()() : status('เขียนไฟล์ผิดพลาด: ' + e.data);
 
 // clear leftovers from previous sessions
 (async () => {
