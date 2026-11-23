@@ -133,7 +133,7 @@ const code = String(Math.floor(100000 + Math.random() * 900000));
 const peer = new Peer('bigdrop-' + code);
 peer.on('open', () => { $('code').textContent = code; status('รอเชื่อมต่อ — กรอกรหัสอีกเครื่อง หรือให้อีกเครื่องกรอกรหัสนี้'); });
 peer.on('error', e => e.type === 'unavailable-id' ? location.reload() : status('ผิดพลาด: ' + e.type));
-peer.on('connection', setup);
+peer.on('connection', c => dc ? c.close() : setup(c));   // only one peer per session
 $('go').onclick = () => {
   const id = $('to').value.trim();
   if (id) { status('กำลังเชื่อมต่อ…'); setup(peer.connect('bigdrop-' + id, {reliable: true, serialization: 'raw'})); }
