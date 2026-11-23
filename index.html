@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="th">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BigDrop</title>
+<style>
+  body{font:16px system-ui,sans-serif;max-width:520px;margin:auto;padding:16px}
+  button,input{font:inherit;padding:10px;margin:4px 0}
+  #code{font-size:36px;letter-spacing:4px;font-weight:bold}
+  .f{padding:8px 0;border-bottom:1px solid #ddd;word-break:break-all}
+  progress{width:100%}
+</style>
+<h2>BigDrop</h2>
+<p>รหัสเครื่องนี้: <span id="code">…</span></p>
+<p><input id="to" inputmode="numeric" placeholder="รหัสอีกเครื่อง"> <button id="go">เชื่อมต่อ</button></p>
+<p id="st">กำลังเริ่ม…</p>
+<p><input type="file" id="pick" multiple disabled></p>
+<div id="list"></div>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const status = t => $('st').textContent = t;
+const BLOCK = 4 << 20;            // read 4MB from disk at a time
+let dc, pc, waitDone = null, rx = null, n = 0;
+
+// ---- disk writer: OPFS sync handle in a worker (works in Chrome + iOS Safari) ----
+const worker = new Worker(URL.createObjectURL(new Blob([`
+  let h, off = 0, q = Promise.resolve();
+  onmessage = e => { const d = e.data; q = q.then(async () => {
+    if (d.open) {
+      const root = await navigator.storage.getDirectory();
+      h = await (await root.getFileHandle(d.open, {create: true})).createSyncAccessHandle();
+      h.truncate(0); off = 0;
+    } else if (d.close) { h.flush(); h.close(); postMessage('closed'); }
+    else off += h.write(new Uint8Array(d), {at: off});
+  }).catch(err => postMessage('err:' + err)); };
+`], {type: 'text/javascript'})));
+const closedQ = [];
+worker.onmessage = e => e.data === 'closed' ? closedQ.shift()() : status('เขียนไฟล์ผิดพลาด (พื้นที่เต็ม?) ' + e.data);
+
+// clear leftovers from previous sessions
+(async () => {
+  try { const r = await navigator.storage.getDirectory();
+        for await (const k of r.keys()) await r.removeEntry(k); } catch {}
+})();
+
+// keep screen awake (iOS kills background tabs)
+let lock;
+const wake = async () => { try { lock = await navigator.wakeLock.request('screen'); } catch {} };
+document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && dc && wake());
+
+// ---- UI rows ----
+const mb = b => (b / 1048576).toFixed(1) + ' MB';
+function row(name, size, dir) {
+  const d = document.createElement('div'); d.className = 'f';
+  d.innerHTML = `<div>${dir}: <b></b> (${mb(size)})</div><progress max="1" value="0"></progress><div class="s"></div>`;
+  d.querySelector('b').textContent = name;
+  $('list').prepend(d); d.t0 = performance.now(); d.last = 0; return d;
+}
+function prog(d, got, size) {
+  const now = performance.now();
+  if (got < size && now - d.last < 200) return;
+  d.last = now;
+  d.querySelector('progress').value = size ? got / size : 1;
+  d.querySelector('.s').textContent = `${mb(got)} · ${(got / 1048576 / ((now - d.t0) / 1000)).toFixed(1)} MB/s`;
+}
+
+// ---- receive ----
+function onMsg(e) {
+  if (typeof e.data === 'string') {
+    const m = JSON.parse(e.data);
+    if (m.t === 'meta') {
+      rx = {...m, got: 0, opfs: (n++) + '_' + m.name, row: row(m.name, m.size, 'รับ')};
+      worker.postMessage({open: rx.opfs});
+      if (m.size === 0) finish();
+    } else if (m.t === 'done' && waitDone) { waitDone(); waitDone = null; }
+    return;
+  }
+  rx.got += e.data.byteLength;
+  worker.postMessage(e.data, [e.data]);
+  prog(rx.row, rx.got, rx.size);
+  if (rx.got >= rx.size) finish();
+}
+async function finish() {
+  const r = rx; rx = null;
+  worker.postMessage({close: 1});
+  await new Promise(res => closedQ.push(res));
+  const file = await (await (await navigator.storage.getDirectory()).getFileHandle(r.opfs)).getFile();
+  prog(r.row, r.size, r.size);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(file); a.download = r.name; a.textContent = 'ดาวน์โหลด';
+  const box = document.createElement('div'); box.append(a);
+  if (navigator.canShare) {
+    const shareFile = new File([file], r.name, {type: r.type || 'application/octet-stream'});
+    if (navigator.canShare({files: [shareFile]})) {
+      const b = document.createElement('button'); b.textContent = 'แชร์ / บันทึกลงรูปภาพ';
+      b.onclick = () => navigator.share({files: [shareFile]}).catch(() => {});
+      box.append(' ', b);
+    }
+  }
+  r.row.append(box);
+  dc.send(JSON.stringify({t: 'done'}));
+}
+
+// ---- send ----
+async function sendFile(f) {
+  const r = row(f.name, f.size, 'ส่ง');
+  const chunk = Math.min(65536, pc.sctp?.maxMessageSize || 16384);
+  const done = new Promise(res => waitDone = res);
+  dc.send(JSON.stringify({t: 'meta', name: f.name, size: f.size, type: f.type}));
+  for (let o = 0; o < f.size; o += BLOCK) {
+    const buf = new Uint8Array(await f.slice(o, o + BLOCK).arrayBuffer());
+    for (let i = 0; i < buf.length; i += chunk) {
+      if (dc.bufferedAmount > 16 << 20) await new Promise(res => dc.onbufferedamountlow = res);
+      dc.send(buf.subarray(i, i + chunk));
+    }
+    prog(r, Math.min(o + BLOCK, f.size), f.size);
+  }
+  await done;   // wait until receiver flushed to disk
+  r.querySelector('.s').textContent += ' · ส่งเสร็จ';
+}
+$('pick').onchange = async e => {
+  const files = [...e.target.files]; e.target.value = '';
+  $('pick').disabled = true;
+  try { for (const f of files) await sendFile(f); } catch (err) { status('ส่งล้มเหลว: ' + err); }
+  $('pick').disabled = !dc || dc.readyState !== 'open';
+};
+
+// ---- connect (PeerJS = signaling only, file data goes peer-to-peer) ----
+const code = String(Math.floor(100000 + Math.random() * 900000));
+const peer = new Peer('bigdrop-' + code);
+peer.on('open', () => { $('code').textContent = code; status('รอเชื่อมต่อ — กรอกรหัสอีกเครื่อง หรือให้อีกเครื่องกรอกรหัสนี้'); });
+peer.on('error', e => e.type === 'unavailable-id' ? location.reload() : status('ผิดพลาด: ' + e.type));
+peer.on('connection', setup);
+$('go').onclick = () => {
+  const id = $('to').value.trim();
+  if (id) { status('กำลังเชื่อมต่อ…'); setup(peer.connect('bigdrop-' + id, {reliable: true, serialization: 'raw'})); }
+};
+function setup(c) {
+  c.on('open', () => {
+    dc = c.dataChannel; pc = c.peerConnection;
+    dc.binaryType = 'arraybuffer';
+    dc.bufferedAmountLowThreshold = 1 << 20;
+    dc.onmessage = onMsg;
+    status('เชื่อมต่อแล้ว ✓ เลือกไฟล์เพื่อส่ง');
+    $('pick').disabled = false; wake();
+  });
+  c.on('close', () => { status('การเชื่อมต่อหลุด — รีเฟรชแล้วเชื่อมใหม่'); $('pick').disabled = true; dc = null; });
+}
+</script>
